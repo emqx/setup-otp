@@ -1,0 +1,82 @@
+name: 'Setup Erlang/OTP'
+inputs:
+  otp: # 25.1.2-2, 24.3.4.2-2
+    required: true
+    type: string
+  os:
+    required: true
+    type: string
+    default: macos-12
+  otp_repo:
+    required: false
+    default: https://github.com/emqx/otp.git
+
+runs:
+  using: composite
+  steps:
+    - id: prepare
+      if: startsWith(inputs.os, 'macos')
+      shell: bash
+      run: |
+        brew update
+        brew install bison curl zip unzip coreutils openssl@1.1 unixodbc
+        echo "$(brew --prefix bison)/bin" >> $GITHUB_PATH
+        OTP_SOURCE_PATH="$HOME/src/otp-${{ inputs.otp }}"
+        OTP_INSTALL_PATH="$HOME/otp/${{ inputs.otp }}"
+        echo "OTP_SOURCE_PATH=$OTP_SOURCE_PATH" >> $GITHUB_OUTPUT
+        echo "OTP_INSTALL_PATH=$OTP_INSTALL_PATH" >> $GITHUB_OUTPUT
+        mkdir -p "$OTP_SOURCE_PATH" "$OTP_INSTALL_PATH"
+    - uses: actions/cache@v3
+      if: startsWith(inputs.os, 'macos')
+      id: cache
+      with:
+        path: ${{ steps.prepare.outputs.OTP_INSTALL_PATH }}
+        key: otp-install-${{ inputs.otp }}-${{ inputs.os }}
+    - name: build erlang
+      if: startsWith(inputs.os, 'macos') && steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        OTP_SOURCE_PATH="${{ steps.prepare.outputs.OTP_SOURCE_PATH }}"
+        OTP_INSTALL_PATH="${{ steps.prepare.outputs.OTP_INSTALL_PATH }}"
+        if [ -d "$OTP_SOURCE_PATH" ]; then
+          rm -rf "$OTP_SOURCE_PATH"
+        fi
+        git clone --depth 1 --branch OTP-${{ inputs.otp }} ${{ inputs.otp_repo }} "$OTP_SOURCE_PATH"
+        cd "$OTP_SOURCE_PATH"
+        if [ "$(arch)" = arm64 ]; then
+            export LDFLAGS="-L$(brew --prefix unixodbc)/lib"
+            export CC="/usr/bin/gcc -I$(brew --prefix unixodbc)/include"
+        fi
+        ./configure --disable-dynamic-ssl-lib --with-ssl=$(brew --prefix openssl@1.1) --disable-hipe --disable-jit --prefix="$OTP_INSTALL_PATH"
+        make -j$(nproc)
+        rm -rf "$OTP_INSTALL_PATH"
+        make install
+        if [ "$(arch)" = arm64 ]; then
+            unset LDFLAGS
+            unset CC
+        fi
+        echo "$OTP_INSTALL_PATH/bin" >> $GITHUB_PATH
+
+    - name: build rebar3
+      if: startsWith(inputs.os, 'macos')
+      shell: bash
+      env:
+        OTP_VSN: ${{ inputs.otp }}
+      run: |
+        case $OTP_VSN in
+            24*)
+                VERSION="3.18.0-emqx-1"
+                ;;
+            25*)
+                VERSION="3.19.0-emqx-1"
+                ;;
+            *)
+                echo "Unsupporetd Erlang/OTP version $OTP_VSN"
+                exit 1
+                ;;
+        esac
+
+        DOWNLOAD_URL='https://github.com/emqx/rebar3/releases/download'
+        curl -f -L "${DOWNLOAD_URL}/${VERSION}/rebar3" -o $(brew --prefix)/bin/rebar3
+        chmod +x $(brew --prefix)/bin/rebar3
+        rebar3 --version
